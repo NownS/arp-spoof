@@ -253,7 +253,7 @@ int main(int argc, char *argv[]) {
         } else if (ethernet->type() == EthHdr::Arp){
             arp = (PArpHdr)(packet + sizeof(*ethernet));
             if (arp->op() != ArpHdr::Request) continue;
-            sendARP_reply(handle, *p, attacker_mac, senderMac_target_Map[arp->smac()].tip_, arp->sip());
+            sendARP_reply(handle, *p, attacker_mac, senderMac_target_Map[*p].tip_, senderMac_target_Map[*p].sip_);
         }
     }
 
