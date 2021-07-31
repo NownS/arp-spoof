@@ -157,7 +157,7 @@ void ARPInfect(pcap_t *handle, Mac *sender_addr_Mac, Mac attackerMac, std::map<M
         for(unsigned int i=0;i<len;i++){
             sendARP_reply(handle, sender_addr_Mac[i], attackerMac, senderMac_target_Map[sender_addr_Mac[i]].tip_, senderMac_target_Map[sender_addr_Mac[i]].sip_);
         }
-        sleep(5);
+        sleep(10);
     }
 }
 
