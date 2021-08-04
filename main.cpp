@@ -204,7 +204,7 @@ int main(int argc, char *argv[]) {
             if (ret != 0){
                 fprintf(stderr, "couldn't find Mac addr of %s\n", argv[i+2]);
                 return -1;
-            }Mac("00:00:00:00:00:00")
+            }
             target.sip_ = Ip(argv[i+2]);
             target.smac_ = *(sender_addr_Mac+i/2);
         }
