@@ -73,7 +73,7 @@ Ip get_my_IP(char *interface_name){
 
 int sendARP_req(pcap_t *handle, Mac smac, Ip sip, Ip tip){
     EthArpPacket packet;
-    packet.eth_.dmac_ = Mac("ff:ff:ff:ff:ff:ff");
+    packet.eth_.dmac_ = Mac::broadcastMac();
     packet.eth_.smac_ = Mac(smac);
     packet.eth_.type_ = htons(EthHdr::Arp);
 
@@ -84,7 +84,7 @@ int sendARP_req(pcap_t *handle, Mac smac, Ip sip, Ip tip){
     packet.arp_.op_ = htons(ArpHdr::Request);
     packet.arp_.smac_ = Mac(smac);
     packet.arp_.sip_ = htonl(sip);
-    packet.arp_.tmac_ = Mac("00:00:00:00:00:00");
+    packet.arp_.tmac_ = Mac::nullMac();
     packet.arp_.tip_ = htonl(tip);
 
     int res = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(&packet), sizeof(EthArpPacket));
